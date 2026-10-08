@@ -149,6 +149,9 @@ void setup() {
   }
 #endif // defined(CONFIG_STATIC_IP_ENABLED)
 
+#if defined(CONFIG_LOCAL_HOSTNAME)
+  WiFi.setHostname(CONFIG_LOCAL_HOSTNAME);
+#endif
   WiFi.begin(CONFIG_WIFI_SSID, CONFIG_WIFI_PWD);
 
   while (WiFi.status() != WL_CONNECTED) {

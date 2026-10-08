@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include "Arduino.h"
 #include "math.h"
 #include "stdlib_noniso.h"
 #include "esp_http_server.h"
@@ -35,7 +36,6 @@ static const char *TAG = "camera_httpd";
 #include "fd_forward.h"
 
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
-#include "Arduino.h"
 #include "fr_forward.h"
 #include "fr_flash.h"
 
@@ -85,16 +85,69 @@ static const char *_STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 httpd_handle_t stream_httpd = NULL;
 httpd_handle_t camera_httpd = NULL;
 
+typedef enum
+{
+    ALFAS_WAITING,
+    ALFAS_FACE_DETECTED,
+    ALFAS_AUTHORIZED,
+    ALFAS_DENIED,
+    ALFAS_ENROLLING
+} alfas_state_t;
+
+static alfas_state_t alfas_state = ALFAS_WAITING;
+static int alfas_last_face_id = -1;
+static uint32_t alfas_state_changed_at = 0;
+
+static void set_alfas_state(alfas_state_t state)
+{
+    if (alfas_state != state)
+    {
+        alfas_state = state;
+        alfas_state_changed_at = millis();
+    }
+}
+
+static const char *alfas_state_name(alfas_state_t state)
+{
+    switch (state)
+    {
+        case ALFAS_FACE_DETECTED:
+            return "FACE_DETECTED";
+        case ALFAS_AUTHORIZED:
+            return "AUTHORIZED";
+        case ALFAS_DENIED:
+            return "DENIED";
+        case ALFAS_ENROLLING:
+            return "ENROLLING";
+        case ALFAS_WAITING:
+        default:
+            return "WAITING";
+    }
+}
+
 #ifdef CONFIG_ESP_FACE_DETECT_ENABLED
 
-static int8_t detection_enabled = 0;
+static int8_t detection_enabled = 1;
 
 static mtmn_config_t mtmn_config = {0};
 
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
-static int8_t recognition_enabled = 0;
+static int8_t recognition_enabled = 1;
 static int8_t is_enrolling = 0;
 static face_id_list id_list = {0};
+
+static void update_alfas_detection_state(bool face_detected)
+{
+    alfas_last_face_id = -1;
+    if (is_enrolling)
+    {
+        set_alfas_state(ALFAS_ENROLLING);
+    }
+    else
+    {
+        set_alfas_state(face_detected ? ALFAS_FACE_DETECTED : ALFAS_WAITING);
+    }
+}
 #endif
 
 #endif
@@ -236,12 +289,15 @@ static int run_face_recognition(dl_matrix3du_t *image_matrix, box_array_t *net_b
     if (!aligned_face)
     {
         ESP_LOGE(TAG, "Could not allocate face recognition buffer");
+        update_alfas_detection_state(true);
         return matched_id;
     }
     if (align_face(net_boxes, image_matrix, aligned_face) == ESP_OK)
     {
         if (is_enrolling == 1)
         {
+            set_alfas_state(ALFAS_ENROLLING);
+            alfas_last_face_id = -1;
             int8_t left_sample_face = enroll_face_id_to_flash(&id_list, aligned_face);
 
             if (left_sample_face == (ENROLL_CONFIRM_TIMES - 1))
@@ -253,6 +309,7 @@ static int run_face_recognition(dl_matrix3du_t *image_matrix, box_array_t *net_b
             if (left_sample_face == 0)
             {
                 is_enrolling = 0;
+                set_alfas_state(ALFAS_FACE_DETECTED);
                 ESP_LOGD(TAG, "Enrolled Face ID: %d", id_list.tail);
                 Serial.println("Face ID saved to flash");
             }
@@ -262,11 +319,15 @@ static int run_face_recognition(dl_matrix3du_t *image_matrix, box_array_t *net_b
             matched_id = recognize_face(&id_list, aligned_face);
             if (matched_id >= 0)
             {
+                alfas_last_face_id = matched_id;
+                set_alfas_state(ALFAS_AUTHORIZED);
                 ESP_LOGW(TAG, "Match Face ID: %u", matched_id);
                 rgb_printf(image_matrix, FACE_COLOR_GREEN, "Hello Subject %u", matched_id);
             }
             else
             {
+                alfas_last_face_id = -1;
+                set_alfas_state(ALFAS_DENIED);
                 ESP_LOGW(TAG, "No Match Found");
                 rgb_print(image_matrix, FACE_COLOR_RED, "Intruder Alert!");
                 matched_id = -1;
@@ -275,6 +336,7 @@ static int run_face_recognition(dl_matrix3du_t *image_matrix, box_array_t *net_b
     }
     else
     {
+        update_alfas_detection_state(true);
         ESP_LOGW(TAG, "Face Not Aligned");
         //rgb_print(image_matrix, FACE_COLOR_YELLOW, "Human Detected");
     }
@@ -414,6 +476,9 @@ static esp_err_t capture_handler(httpd_req_t *req)
     int face_id = 0;
     if (!detection_enabled || fb->width > 400)
     {
+#ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
+        update_alfas_detection_state(false);
+#endif
 #endif
         size_t fb_len = 0;
         if (fb->format == PIXFORMAT_JPEG)
@@ -469,6 +534,10 @@ static esp_err_t capture_handler(httpd_req_t *req)
         {
             face_id = run_face_recognition(image_matrix, net_boxes);
         }
+        else
+        {
+            update_alfas_detection_state(true);
+        }
 #endif
         draw_face_boxes(image_matrix, net_boxes, face_id);
         dl_lib_free(net_boxes->score);
@@ -477,6 +546,12 @@ static esp_err_t capture_handler(httpd_req_t *req)
             dl_lib_free(net_boxes->landmark);
         dl_lib_free(net_boxes);
     }
+#ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
+    else
+    {
+        update_alfas_detection_state(false);
+    }
+#endif
 
     jpg_chunking_t jchunk = {req, 0};
     s = fmt2jpg_cb(out_buf, out_len, out_width, out_height, PIXFORMAT_RGB888, 90, jpg_encode_stream, &jchunk);
@@ -557,6 +632,9 @@ static esp_err_t stream_handler(httpd_req_t *req)
             fr_recognize = fr_start;
             if (!detection_enabled || fb->width > 400)
             {
+#ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
+                update_alfas_detection_state(false);
+#endif
 #endif
                 if (fb->format != PIXFORMAT_JPEG)
                 {
@@ -601,6 +679,12 @@ static esp_err_t stream_handler(httpd_req_t *req)
                         {
                             net_boxes = face_detect(image_matrix, &mtmn_config);
                         }
+#ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
+                        if (!net_boxes)
+                        {
+                            update_alfas_detection_state(false);
+                        }
+#endif
                         fr_face = esp_timer_get_time();
                         fr_recognize = fr_face;
                         if (net_boxes || fb->format != PIXFORMAT_JPEG)
@@ -612,6 +696,10 @@ static esp_err_t stream_handler(httpd_req_t *req)
                                 if (recognition_enabled)
                                 {
                                     face_id = run_face_recognition(image_matrix, net_boxes);
+                                }
+                                else
+                                {
+                                    update_alfas_detection_state(true);
                                 }
                                 fr_recognize = esp_timer_get_time();
 #endif
@@ -818,16 +906,20 @@ static esp_err_t cmd_handler(httpd_req_t *req)
         if (!detection_enabled) {
             recognition_enabled = 0;
         }
+        update_alfas_detection_state(false);
 #endif
     }
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
-    else if (!strcmp(variable, "face_enroll"))
+    else if (!strcmp(variable, "face_enroll")) {
         is_enrolling = val;
+        update_alfas_detection_state(false);
+    }
     else if (!strcmp(variable, "face_recognize")) {
         recognition_enabled = val;
         if (recognition_enabled) {
             detection_enabled = val;
         }
+        update_alfas_detection_state(false);
     }
 #endif
 #endif
@@ -925,6 +1017,43 @@ static esp_err_t status_handler(httpd_req_t *req)
 #endif
     *p++ = '}';
     *p++ = 0;
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, json_response, strlen(json_response));
+}
+
+static esp_err_t alfas_status_handler(httpd_req_t *req)
+{
+    char json_response[256];
+    uint32_t uptime_ms = millis();
+    uint32_t state_age_ms = uptime_ms - alfas_state_changed_at;
+
+#ifdef CONFIG_ESP_FACE_DETECT_ENABLED
+    bool face_detect_active = detection_enabled != 0;
+#else
+    bool face_detect_active = false;
+#endif
+
+#ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
+    bool face_recognize_active = recognition_enabled != 0;
+    bool enrolling = is_enrolling != 0;
+    uint8_t stored_faces = id_list.count;
+#else
+    bool face_recognize_active = false;
+    bool enrolling = false;
+    uint8_t stored_faces = 0;
+#endif
+
+    snprintf(json_response, sizeof(json_response),
+             "{\"system\":\"ALFAS\",\"state\":\"%s\",\"face_id\":%d,"
+             "\"face_detect\":%s,\"face_recognize\":%s,\"enrolling\":%s,"
+             "\"stored_faces\":%u,\"uptime_ms\":%u,\"state_age_ms\":%u}",
+             alfas_state_name(alfas_state), alfas_last_face_id,
+             face_detect_active ? "true" : "false",
+             face_recognize_active ? "true" : "false",
+             enrolling ? "true" : "false",
+             (unsigned int)stored_faces, uptime_ms, state_age_ms);
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, json_response, strlen(json_response));
@@ -1131,6 +1260,12 @@ void startCameraServer()
         .handler = status_handler,
         .user_ctx = NULL};
 
+    httpd_uri_t alfas_status_uri = {
+        .uri = "/alfas/status",
+        .method = HTTP_GET,
+        .handler = alfas_status_handler,
+        .user_ctx = NULL};
+
     httpd_uri_t cmd_uri = {
         .uri = "/control",
         .method = HTTP_GET,
@@ -1229,6 +1364,7 @@ void startCameraServer()
         httpd_register_uri_handler(camera_httpd, &index_uri);
         httpd_register_uri_handler(camera_httpd, &cmd_uri);
         httpd_register_uri_handler(camera_httpd, &status_uri);
+        httpd_register_uri_handler(camera_httpd, &alfas_status_uri);
         httpd_register_uri_handler(camera_httpd, &capture_uri);
 #ifndef CONFIG_BMP_CAPTURE_DISABLED
         httpd_register_uri_handler(camera_httpd, &bmp_uri);

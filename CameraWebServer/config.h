@@ -130,7 +130,7 @@ Supported camera models
 //#define CONFIG_BMP_CAPTURE_DISABLED             // Optional. Default is to enable single shot image capture to .BMP format
 //#define CONFIG_STATIC_IP_ENABLED                // Optional. If not defined the IP is obtained from the DHCP server
 //#define CONFIG_SHOW_NETWORK_PARAMS              // Optional
-//#define CONFIG_MDNS_ADVERTISE_ENABLED           // Optional. If mDNS is enabled, the default hostname is "esp32-cam.local"
+#define CONFIG_MDNS_ADVERTISE_ENABLED            // Optional. If mDNS is enabled, the default hostname is "esp32-cam.local"
 #define CONFIG_ESP_FACE_DETECT_ENABLED          // Optional. Works at low resolution <= 320x240
 #define CONFIG_ESP_FACE_RECOGNITION_ENABLED     // Optional. Works at low resolution <= 320x240
 
@@ -143,7 +143,7 @@ Supported camera models
 #endif
 
 #if defined(CONFIG_MDNS_ADVERTISE_ENABLED)
-  //#define CONFIG_LOCAL_HOSTNAME esp32-cam-01"     // Optional. Custom local hostname. Here "esp32-cam-01.local"
+  #define CONFIG_LOCAL_HOSTNAME "alfas"             // Custom local hostname. Here "alfas.local"
 #endif
 
 #if defined(CONFIG_FLASH_LED)
