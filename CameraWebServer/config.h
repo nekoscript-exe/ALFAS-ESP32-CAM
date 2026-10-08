@@ -154,9 +154,34 @@ Supported camera models
   #define CONFIG_FLASH_PWM_FREQ    50000            // Flash LED PWM frequency
   #define CONFIG_FLASH_PWM_BITS    9                // Resolution of duty cycle counter
   #define CONFIG_LED_MAX_INTENSITY 100              // A percentage (0..100) of full intensity
+  #define CONFIG_AUTO_LIGHT_ENABLED 1
+  #define CONFIG_AUTO_LIGHT_LOW_THRESHOLD 85
+  #define CONFIG_AUTO_LIGHT_HIGH_THRESHOLD 120
+  #define CONFIG_AUTO_LIGHT_STEP 8
+  #define CONFIG_AUTO_LIGHT_MAX_DUTY 130
+  #define CONFIG_AUTO_LIGHT_UPDATE_MS 500
+  #define CONFIG_AUTO_LIGHT_SAMPLE_STRIDE 16
+  #define CONFIG_AUTO_LIGHT_FILTER_DIVISOR 4
+  #define CONFIG_AUTO_LIGHT_CENTER_ROI_WIDTH_PERCENT 50
+  #define CONFIG_AUTO_LIGHT_CENTER_ROI_HEIGHT_PERCENT 70
   //#define CONFIG_EASYTARGET_INTENSITY_SCALING     // https://github.com/easytarget/esp32-cam-webserver
   #if !defined(CONFIG_LED_LEDC_CHANNEL)
     #error "Must specify LEDC channel"
+  #endif
+  #if CONFIG_AUTO_LIGHT_LOW_THRESHOLD >= CONFIG_AUTO_LIGHT_HIGH_THRESHOLD
+    #error "Auto Light low threshold must be lower than the high threshold"
+  #endif
+  #if CONFIG_AUTO_LIGHT_LOW_THRESHOLD < 0 || CONFIG_AUTO_LIGHT_HIGH_THRESHOLD > 255
+    #error "Auto Light thresholds must remain between 0 and 255"
+  #endif
+  #if CONFIG_AUTO_LIGHT_MAX_DUTY <= 0 || CONFIG_AUTO_LIGHT_MAX_DUTY >= 255
+    #error "Auto Light maximum duty must remain between 1 and 254"
+  #endif
+  #if CONFIG_AUTO_LIGHT_STEP <= 0 || CONFIG_AUTO_LIGHT_UPDATE_MS <= 0 || CONFIG_AUTO_LIGHT_SAMPLE_STRIDE <= 0 || CONFIG_AUTO_LIGHT_FILTER_DIVISOR <= 0
+    #error "Auto Light step, interval, sample stride and filter divisor must be positive"
+  #endif
+  #if CONFIG_AUTO_LIGHT_CENTER_ROI_WIDTH_PERCENT <= 0 || CONFIG_AUTO_LIGHT_CENTER_ROI_WIDTH_PERCENT > 100 || CONFIG_AUTO_LIGHT_CENTER_ROI_HEIGHT_PERCENT <= 0 || CONFIG_AUTO_LIGHT_CENTER_ROI_HEIGHT_PERCENT > 100
+    #error "Auto Light center ROI dimensions must remain between 1 and 100 percent"
   #endif
 #endif
 

@@ -56,6 +56,13 @@ static const char *TAG = "camera_httpd";
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
 int led_duty = 0;
 bool isStreaming = false;
+static bool auto_light_enabled = CONFIG_AUTO_LIGHT_ENABLED != 0;
+static int filtered_scene_brightness = -1;
+static int filtered_subject_brightness = -1;
+static bool light_uses_face_roi = false;
+static bool light_active = false;
+static int applied_led_pwm = -1;
+static uint32_t last_auto_light_update_ms = 0;
 
 // scale maximum duty cycle by CONFIG_LED_MAX_INTENSITY/100 instead of using CONFIG_LED_MAX_INTENSITY as a ceiling
 #ifdef CONFIG_EASYTARGET_INTENSITY_SCALING
@@ -373,9 +380,174 @@ void enable_led(bool en)
       duty = round( (d*d-0.09)*pwmMax );
 #endif
     }
+    if (duty == applied_led_pwm)
+    {
+        return;
+    }
     ledcWrite(CONFIG_LED_LEDC_CHANNEL, duty);
-    ESP_LOGI(TAG, "Set LED intensity to %d", duty);
+    applied_led_pwm = duty;
+    light_active = duty > 0;
 }
+
+#ifdef CONFIG_ESP_FACE_DETECT_ENABLED
+static int estimate_brightness_roi(const dl_matrix3du_t *image_matrix,
+                                   int roi_x, int roi_y, int roi_width, int roi_height)
+{
+    if (roi_x < 0)
+    {
+        roi_width += roi_x;
+        roi_x = 0;
+    }
+    if (roi_y < 0)
+    {
+        roi_height += roi_y;
+        roi_y = 0;
+    }
+    if (roi_x + roi_width > image_matrix->w)
+    {
+        roi_width = image_matrix->w - roi_x;
+    }
+    if (roi_y + roi_height > image_matrix->h)
+    {
+        roi_height = image_matrix->h - roi_y;
+    }
+    if (roi_width <= 0 || roi_height <= 0)
+    {
+        return -1;
+    }
+
+    const uint32_t pixel_count = roi_width * roi_height;
+    uint32_t channel_sum = 0;
+    uint32_t sample_count = 0;
+
+    for (uint32_t roi_pixel = 0; roi_pixel < pixel_count; roi_pixel += CONFIG_AUTO_LIGHT_SAMPLE_STRIDE)
+    {
+        const uint32_t x = roi_x + (roi_pixel % roi_width);
+        const uint32_t y = roi_y + (roi_pixel / roi_width);
+        const uint32_t offset = ((y * image_matrix->w) + x) * 3;
+        channel_sum += image_matrix->item[offset];
+        channel_sum += image_matrix->item[offset + 1];
+        channel_sum += image_matrix->item[offset + 2];
+        sample_count++;
+    }
+
+    return sample_count ? channel_sum / (sample_count * 3) : -1;
+}
+
+static int estimate_center_brightness(const dl_matrix3du_t *image_matrix)
+{
+    int roi_width = (image_matrix->w * CONFIG_AUTO_LIGHT_CENTER_ROI_WIDTH_PERCENT) / 100;
+    int roi_height = (image_matrix->h * CONFIG_AUTO_LIGHT_CENTER_ROI_HEIGHT_PERCENT) / 100;
+    int roi_x = (image_matrix->w - roi_width) / 2;
+    int roi_y = (image_matrix->h - roi_height) / 2;
+    return estimate_brightness_roi(image_matrix, roi_x, roi_y, roi_width, roi_height);
+}
+
+static bool estimate_largest_face_brightness(const dl_matrix3du_t *image_matrix,
+                                             const box_array_t *boxes,
+                                             int *brightness)
+{
+    if (!boxes || boxes->len <= 0)
+    {
+        return false;
+    }
+
+    int largest_index = -1;
+    uint32_t largest_area = 0;
+    for (int i = 0; i < boxes->len; i++)
+    {
+        int x1 = constrain((int)boxes->box[i].box_p[0], 0, image_matrix->w - 1);
+        int y1 = constrain((int)boxes->box[i].box_p[1], 0, image_matrix->h - 1);
+        int x2 = constrain((int)boxes->box[i].box_p[2], 0, image_matrix->w - 1);
+        int y2 = constrain((int)boxes->box[i].box_p[3], 0, image_matrix->h - 1);
+        if (x2 < x1 || y2 < y1)
+        {
+            continue;
+        }
+
+        uint32_t area = (uint32_t)(x2 - x1 + 1) * (uint32_t)(y2 - y1 + 1);
+        if (area > largest_area)
+        {
+            largest_area = area;
+            largest_index = i;
+        }
+    }
+
+    if (largest_index < 0)
+    {
+        return false;
+    }
+
+    int x1 = constrain((int)boxes->box[largest_index].box_p[0], 0, image_matrix->w - 1);
+    int y1 = constrain((int)boxes->box[largest_index].box_p[1], 0, image_matrix->h - 1);
+    int x2 = constrain((int)boxes->box[largest_index].box_p[2], 0, image_matrix->w - 1);
+    int y2 = constrain((int)boxes->box[largest_index].box_p[3], 0, image_matrix->h - 1);
+    *brightness = estimate_brightness_roi(image_matrix, x1, y1, x2 - x1 + 1, y2 - y1 + 1);
+    return *brightness >= 0;
+}
+
+static int filter_brightness(int filtered_value, int measured_value)
+{
+    if (measured_value < 0)
+    {
+        return filtered_value;
+    }
+    if (filtered_value < 0)
+    {
+        return measured_value;
+    }
+    return ((filtered_value * (CONFIG_AUTO_LIGHT_FILTER_DIVISOR - 1)) + measured_value) /
+           CONFIG_AUTO_LIGHT_FILTER_DIVISOR;
+}
+
+static void update_auto_light(int measured_scene_brightness,
+                              int measured_subject_brightness,
+                              bool uses_face_roi)
+{
+    filtered_scene_brightness = filter_brightness(filtered_scene_brightness, measured_scene_brightness);
+    filtered_subject_brightness = filter_brightness(filtered_subject_brightness, measured_subject_brightness);
+    light_uses_face_roi = uses_face_roi;
+
+    if (!auto_light_enabled || filtered_subject_brightness < 0)
+    {
+        return;
+    }
+
+    uint32_t now = millis();
+    if (now - last_auto_light_update_ms < CONFIG_AUTO_LIGHT_UPDATE_MS)
+    {
+        return;
+    }
+    last_auto_light_update_ms = now;
+
+    int new_duty = led_duty;
+    if (filtered_subject_brightness < CONFIG_AUTO_LIGHT_LOW_THRESHOLD)
+    {
+        new_duty += CONFIG_AUTO_LIGHT_STEP;
+        if (new_duty > CONFIG_AUTO_LIGHT_MAX_DUTY)
+        {
+            new_duty = CONFIG_AUTO_LIGHT_MAX_DUTY;
+        }
+    }
+    else if (filtered_subject_brightness > CONFIG_AUTO_LIGHT_HIGH_THRESHOLD)
+    {
+        new_duty -= CONFIG_AUTO_LIGHT_STEP;
+        if (new_duty < 0)
+        {
+            new_duty = 0;
+        }
+    }
+
+    if (new_duty != led_duty)
+    {
+        led_duty = new_duty;
+        if (isStreaming)
+        {
+            enable_led(true);
+        }
+    }
+}
+#endif
 #endif
 
 #ifndef CONFIG_BMP_CAPTURE_DISABLED
@@ -607,8 +779,16 @@ static esp_err_t stream_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "X-Framerate", "60");
 
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
-    enable_led(true);
     isStreaming = true;
+    if (auto_light_enabled)
+    {
+        led_duty = 0;
+        filtered_scene_brightness = -1;
+        filtered_subject_brightness = -1;
+        light_uses_face_roi = false;
+        last_auto_light_update_ms = 0;
+    }
+    enable_led(true);
 #endif
 
     while (true)
@@ -636,6 +816,13 @@ static esp_err_t stream_handler(httpd_req_t *req)
             fr_recognize = fr_start;
             if (!detection_enabled || fb->width > 400)
             {
+#ifdef CONFIG_LED_ILLUMINATOR_ENABLED
+                if (auto_light_enabled && led_duty != 0)
+                {
+                    led_duty = 0;
+                    enable_led(false);
+                }
+#endif
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
                 update_alfas_detection_state(false);
 #endif
@@ -677,12 +864,27 @@ static esp_err_t stream_handler(httpd_req_t *req)
                     }
                     else
                     {
+#ifdef CONFIG_LED_ILLUMINATOR_ENABLED
+                        int measured_scene_brightness = estimate_brightness_roi(
+                            image_matrix, 0, 0, image_matrix->w, image_matrix->h);
+                        int measured_subject_brightness = estimate_center_brightness(image_matrix);
+                        bool uses_face_roi = false;
+#endif
                         fr_ready = esp_timer_get_time();
                         box_array_t *net_boxes = NULL;
                         if (detection_enabled)
                         {
                             net_boxes = face_detect(image_matrix, &mtmn_config);
                         }
+#ifdef CONFIG_LED_ILLUMINATOR_ENABLED
+                        int measured_face_brightness = -1;
+                        if (estimate_largest_face_brightness(image_matrix, net_boxes, &measured_face_brightness))
+                        {
+                            measured_subject_brightness = measured_face_brightness;
+                            uses_face_roi = true;
+                        }
+                        update_auto_light(measured_scene_brightness, measured_subject_brightness, uses_face_roi);
+#endif
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
                         if (!net_boxes)
                         {
@@ -794,6 +996,11 @@ static esp_err_t stream_handler(httpd_req_t *req)
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
     isStreaming = false;
     enable_led(false);
+    if (auto_light_enabled)
+    {
+        led_duty = 0;
+        last_auto_light_update_ms = 0;
+    }
 #endif
 
     last_frame = 0;
@@ -897,9 +1104,21 @@ static esp_err_t cmd_handler(httpd_req_t *req)
         res = s->set_ae_level(s, val);
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
     else if (!strcmp(variable, "led_intensity")) {
-        led_duty = val;
+        auto_light_enabled = false;
+        led_duty = constrain(val, 0, 255);
         if (isStreaming)
             enable_led(true);
+    }
+    else if (!strcmp(variable, "auto_light")) {
+        auto_light_enabled = val != 0;
+        if (auto_light_enabled) {
+            led_duty = 0;
+            filtered_scene_brightness = -1;
+            filtered_subject_brightness = -1;
+            light_uses_face_roi = false;
+            last_auto_light_update_ms = 0;
+            enable_led(isStreaming);
+        }
     }
 #endif
 
@@ -1028,7 +1247,7 @@ static esp_err_t status_handler(httpd_req_t *req)
 
 static esp_err_t alfas_status_handler(httpd_req_t *req)
 {
-    char json_response[384];
+    char json_response[640];
     uint32_t uptime_ms = millis();
     uint32_t state_age_ms = uptime_ms - alfas_state_changed_at;
     String ip_address = getAlfasIpAddress();
@@ -1049,17 +1268,41 @@ static esp_err_t alfas_status_handler(httpd_req_t *req)
     uint8_t stored_faces = 0;
 #endif
 
+#ifdef CONFIG_LED_ILLUMINATOR_ENABLED
+    bool auto_light = auto_light_enabled;
+    int brightness = filtered_subject_brightness;
+    int scene_brightness = filtered_scene_brightness;
+    int subject_brightness = filtered_subject_brightness;
+    const char *light_roi = light_uses_face_roi ? "face" : "center";
+    bool current_light_active = light_active;
+    int light_duty = led_duty;
+#else
+    bool auto_light = false;
+    int brightness = -1;
+    int scene_brightness = -1;
+    int subject_brightness = -1;
+    const char *light_roi = "center";
+    bool current_light_active = false;
+    int light_duty = -1;
+#endif
+
     snprintf(json_response, sizeof(json_response),
              "{\"system\":\"ALFAS\",\"state\":\"%s\",\"face_id\":%d,"
              "\"face_detect\":%s,\"face_recognize\":%s,\"enrolling\":%s,"
              "\"stored_faces\":%u,\"uptime_ms\":%u,\"state_age_ms\":%u,"
-             "\"network_mode\":\"%s\",\"ip\":\"%s\",\"hostname\":\"%s\"}",
+             "\"network_mode\":\"%s\",\"ip\":\"%s\",\"hostname\":\"%s\","
+             "\"auto_light\":%s,\"brightness\":%d,\"scene_brightness\":%d,"
+             "\"subject_brightness\":%d,\"light_roi\":\"%s\","
+             "\"light_active\":%s,\"light_duty\":%d}",
              alfas_state_name(alfas_state), alfas_last_face_id,
              face_detect_active ? "true" : "false",
              face_recognize_active ? "true" : "false",
              enrolling ? "true" : "false",
              (unsigned int)stored_faces, uptime_ms, state_age_ms,
-             getAlfasNetworkMode(), ip_address.c_str(), getAlfasHostname());
+             getAlfasNetworkMode(), ip_address.c_str(), getAlfasHostname(),
+             auto_light ? "true" : "false", brightness, scene_brightness,
+             subject_brightness, light_roi,
+             current_light_active ? "true" : "false", light_duty);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
