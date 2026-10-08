@@ -35,7 +35,9 @@ static const char *TAG = "camera_httpd";
 #include "fd_forward.h"
 
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
+#include "Arduino.h"
 #include "fr_forward.h"
+#include "fr_flash.h"
 
 #define ENROLL_CONFIRM_TIMES 5
 #define FACE_ID_SAVE_NUMBER 7
@@ -240,7 +242,7 @@ static int run_face_recognition(dl_matrix3du_t *image_matrix, box_array_t *net_b
     {
         if (is_enrolling == 1)
         {
-            int8_t left_sample_face = enroll_face(&id_list, aligned_face);
+            int8_t left_sample_face = enroll_face_id_to_flash(&id_list, aligned_face);
 
             if (left_sample_face == (ENROLL_CONFIRM_TIMES - 1))
             {
@@ -252,6 +254,7 @@ static int run_face_recognition(dl_matrix3du_t *image_matrix, box_array_t *net_b
             {
                 is_enrolling = 0;
                 ESP_LOGD(TAG, "Enrolled Face ID: %d", id_list.tail);
+                Serial.println("Face ID saved to flash");
             }
         }
         else
@@ -1204,6 +1207,19 @@ void startCameraServer()
 
 #ifdef CONFIG_ESP_FACE_RECOGNITION_ENABLED
     face_id_init(&id_list, FACE_ID_SAVE_NUMBER, ENROLL_CONFIRM_TIMES);
+    int8_t stored_face_ids = read_face_id_from_flash(&id_list);
+    if (stored_face_ids > 0)
+    {
+        Serial.printf("Face database: %d IDs loaded from flash\n", stored_face_ids);
+    }
+    else if (stored_face_ids == 0 || stored_face_ids == -2)
+    {
+        Serial.println("Face database: no stored IDs");
+    }
+    else
+    {
+        Serial.printf("Face database: load failed (%d)\n", stored_face_ids);
+    }
 #endif
 
 #endif
