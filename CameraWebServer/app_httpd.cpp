@@ -85,6 +85,10 @@ static const char *_STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 httpd_handle_t stream_httpd = NULL;
 httpd_handle_t camera_httpd = NULL;
 
+const char *getAlfasNetworkMode();
+const char *getAlfasHostname();
+String getAlfasIpAddress();
+
 typedef enum
 {
     ALFAS_WAITING,
@@ -1024,9 +1028,10 @@ static esp_err_t status_handler(httpd_req_t *req)
 
 static esp_err_t alfas_status_handler(httpd_req_t *req)
 {
-    char json_response[256];
+    char json_response[384];
     uint32_t uptime_ms = millis();
     uint32_t state_age_ms = uptime_ms - alfas_state_changed_at;
+    String ip_address = getAlfasIpAddress();
 
 #ifdef CONFIG_ESP_FACE_DETECT_ENABLED
     bool face_detect_active = detection_enabled != 0;
@@ -1047,12 +1052,14 @@ static esp_err_t alfas_status_handler(httpd_req_t *req)
     snprintf(json_response, sizeof(json_response),
              "{\"system\":\"ALFAS\",\"state\":\"%s\",\"face_id\":%d,"
              "\"face_detect\":%s,\"face_recognize\":%s,\"enrolling\":%s,"
-             "\"stored_faces\":%u,\"uptime_ms\":%u,\"state_age_ms\":%u}",
+             "\"stored_faces\":%u,\"uptime_ms\":%u,\"state_age_ms\":%u,"
+             "\"network_mode\":\"%s\",\"ip\":\"%s\",\"hostname\":\"%s\"}",
              alfas_state_name(alfas_state), alfas_last_face_id,
              face_detect_active ? "true" : "false",
              face_recognize_active ? "true" : "false",
              enrolling ? "true" : "false",
-             (unsigned int)stored_faces, uptime_ms, state_age_ms);
+             (unsigned int)stored_faces, uptime_ms, state_age_ms,
+             getAlfasNetworkMode(), ip_address.c_str(), getAlfasHostname());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");

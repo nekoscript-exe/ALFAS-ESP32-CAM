@@ -13,6 +13,24 @@
 
 void startCameraServer();
 
+static bool alfasAccessPointMode = false;
+
+const char *getAlfasNetworkMode() {
+  return alfasAccessPointMode ? "AP" : "STA";
+}
+
+const char *getAlfasHostname() {
+#if defined(CONFIG_LOCAL_HOSTNAME)
+  return CONFIG_LOCAL_HOSTNAME;
+#else
+  return "esp32-cam";
+#endif
+}
+
+String getAlfasIpAddress() {
+  return alfasAccessPointMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+}
+
 void setup() {
   Serial.begin(CONFIG_BAUD);
   Serial.setDebugOutput(true);
@@ -105,6 +123,8 @@ void setup() {
   s->set_quality(s, CONFIG_DEFAULT_QUALITY);
 #endif
 
+  WiFi.mode(WIFI_STA);
+
 #if defined(CONFIG_STATIC_IP_ENABLED)
   IPAddress staticIP;
   IPAddress subnet;
@@ -152,28 +172,46 @@ void setup() {
 #if defined(CONFIG_LOCAL_HOSTNAME)
   WiFi.setHostname(CONFIG_LOCAL_HOSTNAME);
 #endif
+
+  Serial.println("ALFAS network: connecting to WiFi...");
   WiFi.begin(CONFIG_WIFI_SSID, CONFIG_WIFI_PWD);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  uint32_t wifiConnectStartedAt = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - wifiConnectStartedAt < CONFIG_WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("ALFAS network: connected");
+  } else {
+    Serial.println("ALFAS network: WiFi unavailable");
+    Serial.println("ALFAS network: starting fallback AP");
+
+    alfasAccessPointMode = true;
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
+
+    IPAddress apIP(192, 168, 4, 1);
+    IPAddress apGateway(192, 168, 4, 1);
+    IPAddress apSubnet(255, 255, 255, 0);
+    if (!WiFi.softAPConfig(apIP, apGateway, apSubnet)) {
+      Serial.println("ALFAS network: AP IP configuration failed");
+    }
+    if (!WiFi.softAP(CONFIG_AP_SSID, CONFIG_AP_PASSWORD)) {
+      Serial.println("ALFAS network: fallback AP failed");
+    }
+  }
 
 #if defined(CONFIG_MDNS_ADVERTISE_ENABLED)
-  String mdnsHostname;
-  #if defined(CONFIG_LOCAL_HOSTNAME)
-    if (MDNS.begin(CONFIG_LOCAL_HOSTNAME)) {
-     mdnsHostname = CONFIG_LOCAL_HOSTNAME;
-  #else
-    if (MDNS.begin("esp32-cam")) {
-     mdnsHostname = "esp32-cam";
-  #endif
-    MDNS.addService("http", "tcp", 80);
-    Serial.println("mDNS advertising started");
-  } else {
-    Serial.println("Error starting mDNS");
+  bool mdnsStarted = false;
+  if (!alfasAccessPointMode) {
+    if (MDNS.begin(getAlfasHostname())) {
+      MDNS.addService("http", "tcp", 80);
+      mdnsStarted = true;
+    } else {
+      Serial.println("ALFAS network: mDNS failed");
+    }
   }
 #endif // defined(CONFIG_MDNS_ADVERTISE_ENABLED)
 
@@ -186,26 +224,35 @@ void setup() {
 #endif // defined(CONFIG_LED_ILLUMINATOR_ENABLED)
 
   Serial.println("Camera Ready!");
-  Serial.print("Use 'http://");
-  Serial.print(WiFi.localIP());
-#if defined(CONFIG_MDNS_ADVERTISE_ENABLED)
-  if (mdnsHostname.length() > 0) {
-    Serial.print("' or 'http://");
-    Serial.print(mdnsHostname);
-    Serial.print(".local");
+  Serial.printf("ALFAS network mode: %s\n", getAlfasNetworkMode());
+  if (alfasAccessPointMode) {
+    Serial.printf("ALFAS SSID: %s\n", CONFIG_AP_SSID);
   }
-#endif // defined(CONFIG_MDNS_ADVERTISE_ENABLED)
-  Serial.println("' to connect.");
+  String alfasIpAddress = getAlfasIpAddress();
+  Serial.printf("ALFAS IP: %s\n", alfasIpAddress.c_str());
+  if (alfasAccessPointMode) {
+    Serial.printf("ALFAS URL: http://%s\n", alfasIpAddress.c_str());
+  }
+#if defined(CONFIG_MDNS_ADVERTISE_ENABLED)
+  else if (mdnsStarted) {
+    Serial.printf("ALFAS URL: http://%s.local\n", getAlfasHostname());
+  }
+#endif
+  else {
+    Serial.printf("ALFAS URL: http://%s\n", alfasIpAddress.c_str());
+  }
 
 #if defined(CONFIG_SHOW_NETWORK_PARAMS)
-  Serial.print("Gateway: ");
-  Serial.println(WiFi.gatewayIP());
-  Serial.print("Subnet mask: ");
-  Serial.println(WiFi.subnetMask());
-  Serial.print("DNS server 1: ");
-  Serial.println(WiFi.dnsIP(0));
-  Serial.print("DNS server 2: ");
-  Serial.println(WiFi.dnsIP(1));
+  if (!alfasAccessPointMode) {
+    Serial.print("Gateway: ");
+    Serial.println(WiFi.gatewayIP());
+    Serial.print("Subnet mask: ");
+    Serial.println(WiFi.subnetMask());
+    Serial.print("DNS server 1: ");
+    Serial.println(WiFi.dnsIP(0));
+    Serial.print("DNS server 2: ");
+    Serial.println(WiFi.dnsIP(1));
+  }
 #endif // defined(CONFIG_SHOW_NETWORK_PARAMS)
 
 }
