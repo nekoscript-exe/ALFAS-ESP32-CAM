@@ -32,3 +32,6 @@
 *.app
 
 CameraWebServer/secrets.h
+
+# PlatformIO build artifacts
+.pio/

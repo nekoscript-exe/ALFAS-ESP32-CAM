@@ -122,8 +122,8 @@ Supported camera models
 
 // common configuration
 
-#define CONFIG_WIFI_SSID "WIFI_SSID"
-#define CONFIG_WIFI_PWD  "WIFI_PASSWORD"
+#define CONFIG_WIFI_SSID WIFI_SSID
+#define CONFIG_WIFI_PWD  WIFI_PASSWORD
 
 #define CONFIG_BAUD 115200                        // PlatformIO: set monitor_speed to the same value
 //#define CORE_DEBUG_LEVEL ARDUHAL_LOG_LEVEL_INFO // Optional. Default is ARDUHAL_LOG_LEVEL_ERROR see https://thingpulse.com/esp32-logging/
